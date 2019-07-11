@@ -26,6 +26,8 @@ along with revelationcli.  If not, see <http://www.gnu.org/licenses/>.
 from revelation.datahandler import detect_handler
 from revelation.io import DataFile
 from revelation import data
+from xml.sax.saxutils import escape
+import json
 
 import argparse
 import cmd
@@ -50,6 +52,12 @@ if '--debug' in sys.argv:
 elif '--verbose' in sys.argv:
     LOG.setLevel(logging.INFO)
 
+PWSAFE_FIELD_MAPPING = {
+    'Username' : 'username',
+    'Password' : 'password',
+    'Hostname' : 'url',
+    'Email'    : 'email'
+}
 
 def get_arguments():
     """ Handle the command line arguments given to this program """
@@ -77,6 +85,9 @@ def get_arguments():
                 help="Gives more info about what's going on")
     parser.add_argument('--debug', action='store_true',
                 help="Outputs bunches of debugging info")
+    parser.add_argument('--export', action='store_true',
+                        dest='export_database',
+                        help='Export database in "Password Safe" format')
     return parser.parse_args()
 
 
@@ -157,6 +168,27 @@ class RevelationCli(object):
         self._see_entry(itera, lvl=lvl, folder_only=folder_only,
             iterative=iterative)
 
+    def _export_entry(self, entry):
+        print '<entry>'
+        comments = {}
+        pwseen = False
+        print '  <title>' + escape(entry.name) + '</title>'
+        for field in entry.fields:
+            if field.name == 'Password':
+                pwseen = True
+            if field.name in PWSAFE_FIELD_MAPPING:
+                xml_node = PWSAFE_FIELD_MAPPING[field.name]
+                print('  <%s>%s</%s>' % (xml_node, escape(field.value), xml_node))
+            else:
+                comments[field.name] = field.value
+        if not pwseen:
+            print '<password/>'
+        if len(self.node_path):
+            print '<group>' + escape(".".join(self.node_path)) + '</group>'
+        if len(comments):
+            print '  <notes>' + escape(json.dumps(comments)) + '</notes>'
+        print '</entry>'
+
     def _see_entry(self, itera, lvl=None, folder_only=False,
         iterative=True):
         """ For a given iterator (position) in the EntryStore, see if the
@@ -170,7 +202,10 @@ class RevelationCli(object):
         """
         entry = self.passwords.get_value(itera, 2)
         LOG.debug('Entry (%s) : %s', entry.typename, entry.name)
-        if lvl:
+        if self.export_database:
+            if entry.typename != 'Folder':
+                self._export_entry(entry)
+        elif lvl:
             LOG.debug('Level : %s', lvl)
             LOG.debug('Folder_only : %s', folder_only)
             if folder_only and entry.typename == 'Folder':
@@ -189,12 +224,14 @@ class RevelationCli(object):
                     elif self.show:
                         print '  %s : %s' % (field.name, field.value)
         if self.passwords.iter_has_child(itera):
+            self.node_path.append(entry.name)
             children = self.passwords.iter_children(itera)
             if lvl and iterative:
                 self._browse_entry(children, lvl=lvl + 1,
                     folder_only=folder_only)
             elif iterative:
                 self._browse_entry(children, folder_only=folder_only)
+            self.node_path.pop()
 
     def main(self):
         """ Main function, reads the command line argument and set the
@@ -208,6 +245,7 @@ class RevelationCli(object):
                 self.conf.get('revelationcli', 'database'))
         self.password_name = args.password_name
         self.show = args.show
+        self.export_database = args.export_database
 
         if not self.dbfile:
             print "No database file specified"
@@ -265,9 +303,15 @@ class RevelationCli(object):
         """
         LOG.debug('Show the ascii-tree of the database.')
         itera = self.passwords.get_iter_first()
-        print "Database:"
+        self.node_path = []
+        if self.export_database:
+            print '<passwordsafe delimiter=\'.\'>'
+        else:
+            print "Database:"
         self._browse_entry(itera, lvl=1, folder_only=folder_only,
             iterative=iterative)
+        if self.export_database:
+            print '</passwordsafe>'
 
 
 class RevelationInteractive(cmd.Cmd, RevelationCli):
