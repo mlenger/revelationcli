@@ -26,6 +26,8 @@ along with revelationcli.  If not, see <http://www.gnu.org/licenses/>.
 from revelation.datahandler import detect_handler
 from revelation.io import DataFile
 from revelation import data
+from xml.sax.saxutils import escape
+import json
 
 import argparse
 import cmd
@@ -35,6 +37,7 @@ import logging
 import sys
 import os
 from warnings import warn
+
 
 TKIMPORT = True
 try:
@@ -50,6 +53,86 @@ if '--debug' in sys.argv:
 elif '--verbose' in sys.argv:
     LOG.setLevel(logging.INFO)
 
+
+class EntryVisitor(object):
+    ENTRY_INDEX = 2
+    TYPE_FOLDER = 'Folder'
+
+    def __init__(self, database):
+        self.node_path = []
+        self.database = database
+
+    def visit_entry(self, entry):
+        pass
+
+    def visit_folder(self, entry):
+        pass
+
+    def visit_nodes(self, itera = None):
+        if not itera:
+            itera = self.database.get_iter_first()
+        while itera:
+            entry = self.database.get_value(itera, self.ENTRY_INDEX)
+            if entry.typename != 'Folder':
+                self.visit_entry(entry)
+            else:
+                self.visit_folder(entry)
+            if self.database.iter_has_child(itera):
+                children = self.database.iter_children(itera)
+                self.node_path.append(entry.name)
+                self.visit_nodes(children)
+                self.node_path.pop()
+            itera = self.database.iter_next(itera)
+
+
+class PasswordSafeExporter(EntryVisitor):
+    PWSAFE_FIELD_MAPPING = {
+        'Username' : 'username',
+        'Password' : 'password',
+        'Hostname' : 'url',
+        'Email'    : 'email'
+    }
+
+    def __init__(self, database):
+        super(PasswordSafeExporter, self).__init__(database)
+
+    def _make_text_node(self, node_name, text):
+        self.out_file.write('  <' + node_name)
+        self.out_file.write(">")
+        self.out_file.write(escape(text))
+        self.out_file.write('</' + node_name + '>\n')
+
+    def export_to(self, out_file):
+        self.out_file = out_file
+        self.out_file.write('<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>\n')
+        self.out_file.write('<passwordsafe delimiter=\'.\'>\n')
+        self.visit_nodes()
+        self.out_file.write('</passwordsafe>')
+
+    def visit_entry(self, entry):
+        self.out_file.write('<entry>\n')
+        comments = {}
+        pwseen = False
+        self._make_text_node('title', entry.name)
+        for field in entry.fields:
+            if field.name == 'Password':
+                pwseen = True
+            if field.name in self.PWSAFE_FIELD_MAPPING:
+                xml_node = self.PWSAFE_FIELD_MAPPING[field.name]
+                self._make_text_node(xml_node, field.value)
+            else:
+                comments[field.name] = field.value
+        if not pwseen:
+            self._make_text_node('password', 'invalid')
+        if len(self.node_path):
+            self._make_text_node('group', '.'.join(self.node_path))
+        if len(comments):
+            self._make_text_node('notes', json.dumps(comments))
+        self.out_file.write('</entry>\n')
+
+EXPORT_FILTERS = {
+    'pwsafe' : PasswordSafeExporter,
+}
 
 def get_arguments():
     """ Handle the command line arguments given to this program """
@@ -77,6 +160,10 @@ def get_arguments():
                 help="Gives more info about what's going on")
     parser.add_argument('--debug', action='store_true',
                 help="Outputs bunches of debugging info")
+    parser.add_argument('--export', choices=[", ".join(EXPORT_FILTERS.keys())], type=str,
+                        dest='export_database',
+                        help='Export database in selected format. \
+                        Currently only Password Safe (pwsafe.org) XML format is supported')
     return parser.parse_args()
 
 
@@ -233,7 +320,10 @@ class RevelationCli(object):
                 ppi.do_quit(None)
                 print ""
 
-        if args.show_folders:
+        if args.export_database:
+            exporter = EXPORT_FILTERS[args.export_database](self.passwords)
+            exporter.export_to(sys.stdout)
+        elif args.show_folders:
             self.show = False
             self.show_tree(folder_only=True)
         else:
